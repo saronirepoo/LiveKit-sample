@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>LiveKit Video + Chat</title>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+</head>
+<body>
+  <h2>LiveKit Video + Chat Room</h2>
+  <button id="joinBtn">Join Room</button>
+  <p id="status">Status: Not connected</p>
+
+  <div id="chat" style="border:1px solid #ccc; padding:10px; width:300px; height:200px; overflow-y:auto;"></div>
+  <input type="text" id="chatInput" placeholder="Type a message..." style="width:200px;">
+  <button onclick="sendMessage()">Send</button>
+
+  <script>
+    let room;
+
+    document.getElementById("joinBtn").onclick = async () => {
+      const status = document.getElementById('status');
+
+      try {
+        const res = await fetch("http://localhost:8000/get-token?identity=alice&room=test-room");
+        const { token } = await res.json();
+
+        room = new LivekitClient.Room();
+        await room.connect("wss://sample-task-d7d7p3se.livekit.cloud", token);
+
+        status.textContent = "✅ Connected to room: " + room.name;
+        console.log("Connected to room:", room.name);
+
+        await room.localParticipant.enableCameraAndMicrophone();
+
+        // Display incoming video tracks
+        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+          if (track.kind === 'video') {
+            const videoEl = track.attach();
+            document.body.appendChild(videoEl);
+          }
+        });
+
+        // 👇 Handle incoming chat messages
+        room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant) => {
+          const msg = new TextDecoder().decode(payload);
+          const chatDiv = document.getElementById("chat");
+          const p = document.createElement("p");
+          p.textContent = `${participant.identity}: ${msg}`;
+          chatDiv.appendChild(p);
+        });
+
+      } catch (err) {
+        console.error("❌ Error:", err);
+        status.textContent = "❌ Connection failed";
+      }
+    };
+
+    // 👇 Send chat message
+    async function sendMessage() {
+  const input = document.getElementById("chatInput");
+  const msg = input.value.trim();
+   console.log("Message:", msg);
+  console.log("Room:", room);
+  console.log("Connected:", room.state !== 'connected');
+
+  if (!msg || !room || room.state !== 'connected') {
+    alert("Not connected or message is empty");
+    return;
+  }
+
+  const payload = new TextEncoder().encode(msg);
+
+  try {
+    await room.localParticipant.publishData(payload, { reliable: true });
+
+    // Show your own message
+    const chatDiv = document.getElementById("chat");
+    const p = document.createElement("p");
+    p.textContent = `Me: ${msg}`;
+    chatDiv.appendChild(p);
+    input.value = "";
+  } catch (err) {
+    console.error("❌ Failed to send message:", err);
+    alert("Send failed");
+  }
+}
+
+  </script>
+</body>
+</html>
