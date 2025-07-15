@@ -1,135 +1,138 @@
-import React, { useEffect, useState } from 'react';
-import { Room, RoomEvent } from 'livekit-client';
+// src/VideoChat.js
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import {
+    Room,
+    RoomEvent,
+    createLocalVideoTrack,
+    createLocalAudioTrack,
+    Track,
+} from 'livekit-client';
 
-function VideoChat({ identity, roomName }) {
-    const [room, setRoom] = useState(null);
-    const [message, setMessage] = useState('');
+const VideoChat = ({ identity, roomName, role = 'viewer' }) => {
+    const roomRef = useRef(null);
+    const videoContainerRef = useRef(null);
     const [chat, setChat] = useState([]);
+    const [message, setMessage] = useState('');
+    const [connected, setConnected] = useState(false);
 
-    useEffect(() => {
-        let currentRoom = null;
+    const connectToRoom = useCallback(async () => {
+        const tokenRes = await fetch(
+            `http://localhost:8000/get-token?identity=${identity}&room=${roomName}&role=${role}`
+        );
+        const { token } = await tokenRes.json();
 
-        const connectToLiveKit = async () => {
-            console.log("🔄 Connecting to LiveKit...");
+        const room = new Room({
+            autoSubscribe: true,
+            rtcConfig: {
+                iceServers: [
+                    { urls: ['stun:stun.l.google.com:19302'] }, // TURN optional
+                ],
+                iceTransportPolicy: 'all',
+            },
+        });
+
+        roomRef.current = room;
+
+        // Attach remote tracks
+        room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+            console.log(`Track subscribed from ${participant.identity}`);
+            if (track.kind === Track.Kind.Video) {
+                const videoEl = document.createElement('video');
+                videoEl.autoplay = true;
+                videoEl.playsInline = true;
+                videoEl.width = 300;
+                track.attach(videoEl);
+                videoContainerRef.current.appendChild(videoEl);
+            }
+            if (track.kind === Track.Kind.Audio) {
+                track.attach(); // audio plays automatically
+            }
+        });
+
+        room.on(RoomEvent.DataReceived, (payload, participant) => {
             try {
-                const res = await fetch(`${process.env.REACT_APP_API_URL}/get-token?identity=${identity}&room=${roomName}`);
-                const data = await res.json();
-
-                const newRoom = new Room();
-                currentRoom = newRoom;
-                setRoom(newRoom);
-
-                await newRoom.connect(process.env.REACT_APP_LIVEKIT_URL, data.token);
-                console.log("✅ Connected to LiveKit");
-
-                try {
-                    await newRoom.localParticipant.enableCameraAndMicrophone();
-                    console.log("✅ Camera and mic enabled");
-                } catch (err) {
-                    console.error("❌ Camera/Mic error:", err);
-                    alert("Please allow camera and microphone access.");
-                    return;
-                }
-
-                // Show local video
-                if (newRoom.localParticipant.videoTracks) {
-                    newRoom.localParticipant.videoTracks.forEach((publication) => {
-                        if (publication.track) {
-                            const el = publication.track.attach();
-                            el.style.border = '2px solid green';
-                            document.getElementById('video-area')?.appendChild(el);
-                        }
-                    });
-                }
-
-                // Show remote video
-                newRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-                    if (track.kind === 'video') {
-                        const el = track.attach();
-                        el.style.border = '2px solid blue';
-                        document.getElementById('video-area')?.appendChild(el);
-                    }
-                });
-
-                // Handle incoming messages
-                newRoom.on(RoomEvent.DataReceived, (payload, participant) => {
-                    const msg = new TextDecoder().decode(payload);
-                    setChat(prev => [...prev, `${participant.identity}: ${msg}`]);
-                });
-
-                // Handle disconnects
-                newRoom.on(RoomEvent.Disconnected, () => {
-                    console.warn("🔌 Disconnected from room");
-                });
-
-            } catch (err) {
-                console.error("❌ Error connecting to LiveKit:", err);
+                const text = new TextDecoder().decode(payload);
+                const parsed = JSON.parse(text);
+                setChat(prev => [...prev, `${parsed.sender}: ${parsed.message}`]);
+            } catch (e) {
+                console.warn('Failed to parse incoming chat message:', e);
             }
-        };
+        });
 
-        connectToLiveKit();
+        room.on(RoomEvent.Disconnected, () => {
+            console.warn('Disconnected from room');
+            setConnected(false);
+        });
 
-        return () => {
-            if (currentRoom) {
-                console.log("🧹 Disconnecting room");
-                currentRoom.disconnect();
-            }
-        };
-    }, [identity, roomName]);
+        await room.connect('ws://localhost:7880', token);
+
+        if (role === 'host') {
+            const [videoTrack, audioTrack] = await Promise.all([
+                createLocalVideoTrack(),
+                createLocalAudioTrack(),
+            ]);
+            await room.localParticipant.publishTrack(videoTrack);
+            await room.localParticipant.publishTrack(audioTrack);
+
+            // Show host's own video
+            const localVideoEl = document.createElement('video');
+            localVideoEl.autoplay = true;
+            localVideoEl.muted = true;
+            localVideoEl.playsInline = true;
+            localVideoEl.width = 300;
+            videoTrack.attach(localVideoEl);
+            videoContainerRef.current.appendChild(localVideoEl);
+        }
+
+        setConnected(true);
+    }, [identity, roomName, role]);
 
     useEffect(() => {
-        const div = document.getElementById('chat-box');
-        if (div) div.scrollTop = div.scrollHeight;
-    }, [chat]);
+        connectToRoom();
+        return () => {
+            roomRef.current?.disconnect();
+        };
+    }, [connectToRoom]);
 
-    const sendMessage = async () => {
-        if (!room || !message.trim()) return;
+    const sendMessage = () => {
+        const room = roomRef.current;
+        const lp = room?.localParticipant;
+        if (!room || !lp || room.state !== 'connected' || !message.trim()) return;
 
-        try {
-            if (room.state !== 'connected') {
-                console.warn('Room not connected');
-                return;
-            }
+        const payload = JSON.stringify({
+            sender: identity,
+            message: message.trim(),
+        });
+        const encoded = new TextEncoder().encode(payload);
+        lp.publishData(encoded, { reliable: true });
 
-            const encoded = new TextEncoder().encode(message);
-            await room.localParticipant.publishData(encoded, { reliable: true });
-            setChat(prev => [...prev, `Me: ${message}`]);
-            setMessage('');
-        } catch (err) {
-            console.error("Send failed:", err);
-        }
+        setChat(prev => [...prev, `Me: ${message.trim()}`]);
+        setMessage('');
     };
 
     return (
         <div>
-            <h3>Room: {roomName} | You: {identity}</h3>
+            <h2>Room: {roomName} | User: {identity} ({role})</h2>
 
-            <div id="video-area" style={{ marginBottom: 20, display: 'flex', gap: '10px' }}></div>
+            <div ref={videoContainerRef} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }} />
 
-            <div
-                id="chat-box"
-                style={{
-                    border: '1px solid #ccc',
-                    padding: 10,
-                    height: 150,
-                    overflowY: 'auto',
-                    marginBottom: 10,
-                }}
-            >
+            <div style={{ border: '1px solid #ccc', padding: '8px', marginTop: '10px', minHeight: '100px' }}>
                 {chat.map((msg, idx) => (
-                    <p key={idx} style={{ margin: 0 }}>{msg}</p>
+                    <div key={idx}>{msg}</div>
                 ))}
             </div>
 
             <input
+                type="text"
+                placeholder="Type a message"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                placeholder="Type a message"
-                style={{ width: '70%' }}
+                disabled={!connected}
+                style={{ marginTop: '10px' }}
             />
-            <button onClick={sendMessage} style={{ marginLeft: 10 }}>Send</button>
+            <button onClick={sendMessage} disabled={!connected}>Send</button>
         </div>
     );
-}
+};
 
 export default VideoChat;
