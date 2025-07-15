@@ -1,0 +1,15 @@
+services:
+  livekit:
+    build: .
+    ports:
+      - "7880:7880"    # HTTP API port (optional)
+      - "7881:7881"    # TCP port for TURN/WebRTC
+      - "40000-41000:40000-41000/udp"  # WebRTC UDP range
+    depends_on:
+      - redis
+    command: --config /etc/livekit.yaml
+    restart: unless-stopped
+
+  redis:
+    image: redis
+    restart: unless-stopped
